@@ -4,10 +4,10 @@
 // Name : 김준홍
 //
 #include <assert.h>
-#include <io.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define SEED 10
 
@@ -23,7 +23,7 @@ int NPROC, NIOREQ, QUANTUM;
 struct ioDoneEvent {
     int procid;
     int doneTime;
-    int len;
+    int len; //for queue
     struct ioDoneEvent *prev;
     struct ioDoneEvent *next;
 } ioDoneEventQueue, *ioDoneEvent;
@@ -79,6 +79,7 @@ void initProcTable() {
 void procExecSim(struct process *(*scheduler)()) {
     int pid, qTime = 0, cpuUseTime = 0, nproc = 0, termProc = 0, nioreq = 0;
     char schedule = 0, nextState = S_IDLE;
+    int ioDoneCheck = 0;
     int nextForkTime, nextIOReqTime;
 
     nextForkTime = procIntArrTime[nproc];
@@ -95,28 +96,73 @@ void procExecSim(struct process *(*scheduler)()) {
         compute();
 
         if (currentTime == nextForkTime) { /* CASE 2 : a new process created */
-            struct process *tail = &readyQueue;
+            struct process *tail = &procTable[++nproc];
             readyQueue.len++;
-            for (int i = 0; i < readyQueue.len; i++) {
-                tail = readyQueue.next;
-            }
-            procTable[++nproc].prev = tail->prev;
-            tail = &procTable[nproc];
+            readyQueue.prev->next = tail;
+            tail->prev = readyQueue.prev;
+            tail->next = &readyQueue;
+            readyQueue.prev = tail;
+
             if (runningProc->state == S_RUNNING) {
                 runningProc->prev = tail;
                 tail->next = runningProc;
+                runningProc->next = &readyQueue;
+                readyQueue.prev = runningProc;
                 readyQueue.len++;
             }
 
             scheduler();
         }
         if (qTime == QUANTUM) { /* CASE 1 : The quantum expires */
+            runningProc->state = S_READY;
+            //procTable[runningProc->id].state = S_READY;
+            runningProc->next = &readyQueue;
+            readyQueue.prev->next = runningProc;
+            runningProc->prev = readyQueue.prev;
+            readyQueue.prev = runningProc;
+            readyQueue.len++;
+            scheduler();
         }
         while (ioDoneEventQueue.next->doneTime == currentTime) { /* CASE 3 : IO Done Event */
+            ioDoneCheck = 1;
+            //chage state
+            pid = ioDoneEventQueue.next->procid;
+            procTable[pid].state = S_READY;
+
+            //input ready queue
+            readyQueue.prev->next = &procTable[pid];
+            procTable[pid].prev = readyQueue.prev;
+            procTable[pid].next = &readyQueue;
+            readyQueue.prev = &procTable[pid];
+            readyQueue.len++;
+
+            //delete in ioDoneEventQueue
+            ioDoneEventQueue.next = ioDoneEventQueue.next->next;
+            ioDoneEventQueue.next->prev = &ioDoneEventQueue;
+        }
+        // if ioDone reschedule
+        if (ioDoneCheck == 1) {
+            scheduler();
+            ioDoneCheck = 0;
         }
         if (cpuUseTime == nextIOReqTime) { /* CASE 5: reqest IO operations (only when the process does not terminate) */
+            runningProc->state = S_BLOCKED;
+            //procTable[runningProc->id].state = S_BLOCKED;
+
+            struct ioDoneEvent *temp;
+            temp->doneTime = currentTime + ioServTime[nioreq++];
+            temp->procid = runningProc->id; //? 정확히 모르겠음
+
+            ioDoneEventQueue.prev->next = temp;
+            temp->next = &ioDoneEventQueue;
+            temp->prev = ioDoneEventQueue.prev;
+            ioDoneEventQueue.prev = temp;
+
+            scheduler();
         }
         if (runningProc->serviceTime == runningProc->targetServiceTime) { /* CASE 4 : the process job done and terminates */
+            runningProc->state = S_TERMINATE;
+            scheduler();
         }
 
         // call scheduler() if needed
